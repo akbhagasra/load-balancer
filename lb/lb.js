@@ -1,27 +1,46 @@
 const express = require("express");
 const app = express();
-const { createProxyMiddleware } = require("http-proxy-middleware");
+const router = express.Router();
+const axios = require("axios");
+const proxy = require("http-proxy-middleware");
 const port = 80;
+let currentServer = 0;
+
 const backendServers = [
-  createProxyMiddleware({
-    target: "http://localhost:8081",
-    changeOrigin: true,
-  }),
-  createProxyMiddleware({
-    target: "http://localhost:8082",
-    changeOrigin: true,
-  }),
-  createProxyMiddleware({
-    target: "http://localhost:8083",
-    changeOrigin: true,
-  }),
+  {
+    host: "localhost",
+    port: 8081,
+  },
+  {
+    host: "localhost",
+    port: 8082,
+  },
+  {
+    host: "localhost",
+    port: 8083,
+  },
 ];
 
-app.use(express.text());
+let healthyServers = [];
+const proxyOptions = {
+  target: "",
+  changeOrigin: true,
+  onProxyReq: (proxyReq, req) => {
+    proxyReq.setHeader("X-Special-Proxy-Header", "foobar");
+  },
+  logLevel: "debug",
+};
 
-app.get("/", (req, res) => {
-  const selectedMiddleware = backendServers[0];
-  selectedMiddleware(req, res, (err) => {
+router.all("*", (req, res) => {
+  const server = nextServer();
+  if (!server) {
+    res.status(500).send("No healthy server");
+  }
+
+  proxyOptions.target = `http://${server.host}:${server.port}`;
+  const middleware = proxy.createProxyMiddleware(proxyOptions);
+
+  middleware(req, res, (err) => {
     if (err) {
       console.error("Error forwarding request:", err);
       res.status(500).send("Internal Server Error");
@@ -29,6 +48,37 @@ app.get("/", (req, res) => {
   });
 });
 
+const nextServer = () => {
+  let healthyCount = healthyServers.length;
+  let server = null;
+  if (healthyCount) {
+    server = healthyServers[currentServer % healthyCount];
+    currentServer = (currentServer + 1) % healthyCount;
+  }
+  return server;
+};
+
+const healthChecker = async () => {
+  console.log("Health Check");
+  let healthy = [];
+  for (let server of backendServers) {
+    try {
+      const resp = await axios.get(`http://${server.host}:${server.port}/ping`);
+      if (resp.status === 200) {
+        healthy.push(server);
+      } else {
+        console.error("Unhealthy server:", server);
+      }
+    } catch (err) {
+      console.error("Unhealthy server:", server);
+    }
+  }
+  healthyServers = healthy;
+};
+healthChecker();
+
+app.use("/", router);
 app.listen(port, () => {
   console.log(`Load balancer started on port: ${port}`);
+  setInterval(healthChecker, 5000);
 });
